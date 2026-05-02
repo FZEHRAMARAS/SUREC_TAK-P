@@ -2265,128 +2265,358 @@ elif menu == "Raporlar":
         st.stop()
 
     st.header("Raporlar")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Firma", int(df_query("SELECT COUNT(*) c FROM firms")["c"][0]))
-    c2.metric("Yeterlilik", int(df_query("SELECT COUNT(*) c FROM qualifications")["c"][0]))
-    c3.metric("Ücret Kaydı", int(df_query("SELECT COUNT(*) c FROM exam_fees")["c"][0]))
-    c4.metric("Aday Süreci", int(df_query("SELECT COUNT(*) c FROM candidate_processes")["c"][0]))
 
-    firma_ozet = df_query("""
-        SELECT f.name AS firma, COUNT(*) AS ücret_kaydı,
-               ROUND(AVG(ef.fee_with_vat), 2) AS ortalama_kdv_dahil,
-               ROUND(MIN(ef.fee_with_vat), 2) AS min_kdv_dahil,
-               ROUND(MAX(ef.fee_with_vat), 2) AS max_kdv_dahil
-        FROM exam_fees ef
-        JOIN firms f ON f.id=ef.firm_id
-        GROUP BY f.name
-        ORDER BY ücret_kaydı DESC
-    """)
-    st.subheader("Firma Ücret Özeti")
-    st.dataframe(firma_ozet, width="stretch")
-    download_df_button(firma_ozet, "firma_ucret_ozet.xlsx")
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Genel Özet",
+        "Firma Özel Rapor",
+        "Aday Özel Rapor",
+        "Aday Finans Timeline"
+    ])
 
+    with tab1:
+        st.subheader("Genel Özet")
 
-    st.subheader("Toplu Excel Dışa Aktarım")
+        firma_ozet = df_query("""
+            SELECT f.name AS firma,
+                   COUNT(cp.id) AS süreç_sayısı,
+                   COALESCE(SUM(cp.fee_with_vat),0) AS toplam_kdv_dahil,
+                   COALESCE(SUM(cp.candidate_payment_amount),0) AS adaydan_alınan,
+                   COALESCE(SUM(cp.firm_payment_amount),0) AS firmaya_iletilen
+            FROM firms f
+            LEFT JOIN candidate_processes cp ON cp.firm_id=f.id
+            GROUP BY f.id, f.name
+            ORDER BY f.name
+        """)
+        st.dataframe(firma_ozet, width="stretch")
+        download_df_button(firma_ozet, "firma_genel_ozet.xlsx")
 
-    aday_surecleri_export = df_query("""
-        SELECT cp.id AS süreç_id, c.full_name AS aday, c.tc_no AS tc, c.age AS yaş, c.phone AS telefon,
-               cs.name AS aday_kaynağı,
-               CASE WHEN q.code != '' THEN q.code || ' - ' || q.name ELSE q.name END AS yeterlilik,
-               q.alt_units AS alt_birimler,
-               f.name AS firma,
-               cp.fee_without_vat AS kdv_hariç,
-               cp.vat_rate AS kdv_oranı,
-               cp.fee_with_vat AS kdv_dahil,
-               cp.candidate_payment_amount AS adaydan_alınan,
-               CASE cp.candidate_payment_received WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS aday_ödeme,
-               cp.firm_payment_amount AS firmaya_iletilen,
-               CASE cp.firm_payment_sent WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS firma_ödeme,
-               cp.first_right_status AS birinci_hak,
-               cp.second_right_status AS ikinci_hak,
-               cp.entitlement_status AS belge_hakkı,
-               CASE cp.certificate_fee_paid WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS belge_parası,
-               cp.certificate_print_status AS basım,
-               cp.certificate_delivery_status AS teslim,
-               cp.created_at AS kayıt_tarihi
-        FROM candidate_processes cp
-        JOIN candidates c ON c.id=cp.candidate_id
-        LEFT JOIN candidate_sources cs ON cs.id=c.source_id
-        JOIN qualifications q ON q.id=cp.qualification_id
-        JOIN firms f ON f.id=cp.firm_id
-        ORDER BY cp.id DESC
-    """)
+        st.subheader("Toplu Excel Dışa Aktarım")
 
-    sinavlar_export = df_query("""
-        SELECT es.id, es.session_type AS tür, es.exam_date AS tarih, es.exam_time AS saat,
-               es.exam_place AS sınav_yeri, es.myk_exam_id AS myk_sınav_id,
-               f.name AS firma,
-               ev.full_name AS değerlendirici,
-               CASE es.observer_required WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS gözetmen_gerekli,
-               obs.full_name AS gözetmen,
-               COUNT(esc.id) AS kayıt_sayısı,
-               es.status AS durum
-        FROM exam_sessions es
-        LEFT JOIN firms f ON f.id=es.firm_id
-        LEFT JOIN evaluators ev ON ev.id=es.evaluator_id
-        LEFT JOIN evaluators obs ON obs.id=es.observer_id
-        LEFT JOIN exam_session_candidates esc ON esc.session_id=es.id
-        GROUP BY es.id
-        ORDER BY es.exam_date DESC, es.exam_time DESC
-    """)
+        aday_surecleri_export = df_query("""
+            SELECT cp.id AS süreç_id, c.full_name AS aday, c.tc_no AS tc, c.age AS yaş, c.phone AS telefon,
+                   cs.name AS aday_kaynağı,
+                   CASE WHEN q.code != '' THEN q.code || ' - ' || q.name ELSE q.name END AS yeterlilik,
+                   q.alt_units AS alt_birimler,
+                   f.name AS firma,
+                   cp.fee_without_vat AS kdv_hariç,
+                   cp.vat_rate AS kdv_oranı,
+                   cp.fee_with_vat AS kdv_dahil,
+                   cp.candidate_payment_amount AS adaydan_alınan,
+                   CASE cp.candidate_payment_received WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS aday_ödeme,
+                   cp.firm_payment_amount AS firmaya_iletilen,
+                   CASE cp.firm_payment_sent WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS firma_ödeme,
+                   cp.first_right_status AS birinci_hak,
+                   cp.first_exam_date AS birinci_sınav_tarihi,
+                   cp.second_right_status AS ikinci_hak,
+                   cp.second_exam_date AS ikinci_sınav_tarihi,
+                   cp.entitlement_status AS belge_hakkı,
+                   CASE cp.certificate_fee_paid WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS belge_parası,
+                   cp.certificate_print_status AS basım,
+                   cp.certificate_delivery_status AS teslim,
+                   cp.created_at AS kayıt_tarihi
+            FROM candidate_processes cp
+            JOIN candidates c ON c.id=cp.candidate_id
+            LEFT JOIN candidate_sources cs ON cs.id=c.source_id
+            JOIN qualifications q ON q.id=cp.qualification_id
+            JOIN firms f ON f.id=cp.firm_id
+            ORDER BY cp.id DESC
+        """)
 
-    cari_export = df_query("""
-        SELECT cl.id, cl.transaction_date AS tarih, cl.transaction_type AS tip, cl.category AS kategori,
-               f.name AS firma, c.full_name AS aday,
-               es.exam_date || ' ' || es.exam_time || ' / ' || COALESCE(es.myk_exam_id, '') AS sınav,
-               cl.person_name AS kişi_tedarikçi,
-               cl.amount AS tutar,
-               CASE cl.vat_included WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS kdv_dahil,
-               cl.payment_status AS ödeme_durumu,
-               cl.description AS açıklama
-        FROM cash_ledger cl
-        LEFT JOIN firms f ON f.id=cl.firm_id
-        LEFT JOIN candidates c ON c.id=cl.candidate_id
-        LEFT JOIN exam_sessions es ON es.id=cl.session_id
-        ORDER BY cl.transaction_date DESC, cl.id DESC
-    """)
+        sinavlar_export = df_query("""
+            SELECT es.id, es.session_type AS tür, es.exam_date AS tarih, es.exam_time AS saat,
+                   es.exam_place AS sınav_yeri, es.myk_exam_id AS myk_sınav_id,
+                   f.name AS firma,
+                   ev.full_name AS değerlendirici,
+                   CASE es.observer_required WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS gözetmen_gerekli,
+                   obs.full_name AS gözetmen,
+                   COUNT(esc.id) AS kayıt_sayısı,
+                   es.status AS durum
+            FROM exam_sessions es
+            LEFT JOIN firms f ON f.id=es.firm_id
+            LEFT JOIN evaluators ev ON ev.id=es.evaluator_id
+            LEFT JOIN evaluators obs ON obs.id=es.observer_id
+            LEFT JOIN exam_session_candidates esc ON esc.session_id=es.id
+            GROUP BY es.id
+            ORDER BY es.exam_date DESC, es.exam_time DESC
+        """)
 
-    firmalar_export = df_query("SELECT id, name AS firma, status AS durum, note AS notlar FROM firms ORDER BY name")
-    yeterlilikler_export = df_query("""
-        SELECT id, code AS kod, name AS yeterlilik, alt_units AS alt_birimler, sector AS alan_sektor, status AS durum
-        FROM qualifications
-        ORDER BY name, alt_units
-    """)
-    ucretler_export = df_query("""
-        SELECT ef.id, f.name AS firma,
-               CASE WHEN q.code != '' THEN q.code || ' - ' || q.name ELSE q.name END AS yeterlilik,
-               q.alt_units AS alt_birimler,
-               ef.fee_without_vat AS kdv_hariç,
-               ef.vat_rate AS kdv_oranı,
-               ef.fee_with_vat AS kdv_dahil,
-               ef.source_section AS kaynak,
-               ef.source_row AS kaynak_satır
-        FROM exam_fees ef
-        JOIN firms f ON f.id=ef.firm_id
-        JOIN qualifications q ON q.id=ef.qualification_id
-        ORDER BY f.name, q.name
-    """)
+        cari_export = df_query("""
+            SELECT cl.id, cl.transaction_date AS tarih, cl.transaction_type AS tip, cl.category AS kategori,
+                   cl.person_name AS kişi_tedarikçi,
+                   f.name AS firma, c.full_name AS aday,
+                   es.exam_date || ' ' || es.exam_time || ' / ' || COALESCE(es.myk_exam_id, '') AS sınav,
+                   cl.amount AS tutar,
+                   CASE cl.vat_included WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS kdv_dahil,
+                   cl.payment_status AS ödeme_durumu,
+                   CASE COALESCE(cl.auto_generated,0) WHEN 1 THEN 'Otomatik' ELSE 'Manuel' END AS kayıt_tipi,
+                   cl.description AS açıklama
+            FROM cash_ledger cl
+            LEFT JOIN firms f ON f.id=cl.firm_id
+            LEFT JOIN candidates c ON c.id=cl.candidate_id
+            LEFT JOIN exam_sessions es ON es.id=cl.session_id
+            ORDER BY cl.transaction_date DESC, cl.id DESC
+        """)
 
-    all_sheets = {
-        "Aday Süreçleri": aday_surecleri_export,
-        "Sınavlar": sinavlar_export,
-        "Cari": cari_export,
-        "Firmalar": firmalar_export,
-        "Yeterlilikler": yeterlilikler_export,
-        "Ücretler": ucretler_export,
-        "Firma Özet": firma_ozet
-    }
+        all_sheets = {
+            "Firma Özet": firma_ozet,
+            "Aday Süreçleri": aday_surecleri_export,
+            "Sınavlar": sinavlar_export,
+            "Cari": cari_export
+        }
 
-    st.download_button(
-        "Tüm verileri tek Excel olarak indir",
-        data=to_multi_excel_bytes(all_sheets),
-        file_name="aday_takip_tum_veriler.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        st.download_button(
+            "Tüm verileri tek Excel olarak indir",
+            data=to_multi_excel_bytes(all_sheets),
+            file_name="aday_takip_tum_veriler.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    with tab2:
+        st.subheader("Firma Özel Rapor")
+
+        firm_options = options_with_select(get_options("SELECT id, name AS label FROM firms ORDER BY name"), "Seç")
+        firm_label = st.selectbox("Firma seç", list(firm_options.keys()), key="report_firm_select")
+
+        if firm_label == "Seç":
+            st.info("Rapor almak için firma seç.")
+        else:
+            firm_id = firm_options[firm_label]
+
+            firma_surecler = df_query("""
+                SELECT cp.id AS süreç_id, c.full_name AS aday, c.tc_no AS tc,
+                       CASE WHEN q.code != '' THEN q.code || ' - ' || q.name ELSE q.name END AS yeterlilik,
+                       q.alt_units AS alt_birimler,
+                       cp.fee_with_vat AS kdv_dahil,
+                       cp.candidate_payment_amount AS adaydan_alınan,
+                       CASE cp.candidate_payment_received WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS aday_ödeme,
+                       cp.firm_payment_amount AS firmaya_iletilen,
+                       CASE cp.firm_payment_sent WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS firma_ödeme,
+                       cp.first_right_status AS birinci_hak,
+                       cp.first_exam_date AS birinci_sınav_tarihi,
+                       cp.second_right_status AS ikinci_hak,
+                       cp.second_exam_date AS ikinci_sınav_tarihi,
+                       cp.entitlement_status AS belge_hakkı,
+                       cp.certificate_print_status AS basım,
+                       cp.certificate_delivery_status AS teslim,
+                       cp.created_at AS kayıt_tarihi
+                FROM candidate_processes cp
+                JOIN candidates c ON c.id=cp.candidate_id
+                JOIN qualifications q ON q.id=cp.qualification_id
+                WHERE cp.firm_id=?
+                ORDER BY c.full_name, cp.id DESC
+            """, (firm_id,))
+
+            firma_cari = df_query("""
+                SELECT cl.id, cl.transaction_date AS tarih, cl.transaction_type AS tip, cl.category AS kategori,
+                       c.full_name AS aday, cl.person_name AS kişi_tedarikçi,
+                       cl.amount AS tutar,
+                       cl.payment_status AS ödeme_durumu,
+                       CASE COALESCE(cl.auto_generated,0) WHEN 1 THEN 'Otomatik' ELSE 'Manuel' END AS kayıt_tipi,
+                       cl.description AS açıklama
+                FROM cash_ledger cl
+                LEFT JOIN candidates c ON c.id=cl.candidate_id
+                WHERE cl.firm_id=?
+                ORDER BY cl.transaction_date DESC, cl.id DESC
+            """, (firm_id,))
+
+            firma_sinav = df_query("""
+                SELECT es.id, es.session_type AS tür, es.exam_date AS tarih, es.exam_time AS saat,
+                       es.exam_place AS sınav_yeri, es.myk_exam_id AS myk_sınav_id,
+                       ev.full_name AS değerlendirici,
+                       obs.full_name AS gözetmen,
+                       COUNT(esc.id) AS kayıt_sayısı,
+                       es.status AS durum
+                FROM exam_sessions es
+                LEFT JOIN evaluators ev ON ev.id=es.evaluator_id
+                LEFT JOIN evaluators obs ON obs.id=es.observer_id
+                LEFT JOIN exam_session_candidates esc ON esc.session_id=es.id
+                WHERE es.firm_id=?
+                GROUP BY es.id
+                ORDER BY es.exam_date DESC, es.exam_time DESC
+            """, (firm_id,))
+
+            gelir = float(firma_cari[(firma_cari["tip"] == "Gelir") & (firma_cari["ödeme_durumu"] == "Yapıldı")]["tutar"].sum()) if not firma_cari.empty else 0
+            gider = float(firma_cari[(firma_cari["tip"] == "Gider") & (firma_cari["ödeme_durumu"] == "Yapıldı")]["tutar"].sum()) if not firma_cari.empty else 0
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Süreç Sayısı", len(firma_surecler))
+            m2.metric("Sınav Sayısı", len(firma_sinav))
+            m3.metric("Gelir", money_fmt(gelir))
+            m4.metric("Gider", money_fmt(gider))
+
+            st.markdown("### Firma Aday/Süreçleri")
+            st.dataframe(firma_surecler, width="stretch")
+
+            st.markdown("### Firma Cari")
+            st.dataframe(firma_cari, width="stretch")
+
+            st.markdown("### Firma Sınavları")
+            st.dataframe(firma_sinav, width="stretch")
+
+            st.download_button(
+                "Bu firmaya ait raporu Excel indir",
+                data=to_multi_excel_bytes({
+                    "Süreçler": firma_surecler,
+                    "Cari": firma_cari,
+                    "Sınavlar": firma_sinav
+                }),
+                file_name=f"firma_raporu_{firm_label}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+    with tab3:
+        st.subheader("Aday Özel Rapor")
+
+        candidate_options = options_with_select(
+            get_options("SELECT id, full_name || COALESCE(' / ' || tc_no, '') AS label FROM candidates ORDER BY full_name"),
+            "Seç"
+        )
+        candidate_label = st.selectbox("Aday seç", list(candidate_options.keys()), key="report_candidate_select")
+
+        if candidate_label == "Seç":
+            st.info("Rapor almak için aday seç.")
+        else:
+            candidate_id = candidate_options[candidate_label]
+
+            aday_bilgi = df_query("""
+                SELECT c.id, c.full_name AS aday, c.tc_no AS tc, c.birth_date AS doğum_tarihi,
+                       c.age AS yaş, c.phone AS telefon, cs.name AS aday_kaynağı,
+                       c.note AS aday_notu, c.created_at AS kayıt_tarihi
+                FROM candidates c
+                LEFT JOIN candidate_sources cs ON cs.id=c.source_id
+                WHERE c.id=?
+            """, (candidate_id,))
+
+            aday_surecler = df_query("""
+                SELECT cp.id AS süreç_id, f.name AS firma,
+                       CASE WHEN q.code != '' THEN q.code || ' - ' || q.name ELSE q.name END AS yeterlilik,
+                       q.alt_units AS alt_birimler,
+                       cp.fee_with_vat AS kdv_dahil,
+                       cp.candidate_payment_amount AS adaydan_alınan,
+                       CASE cp.candidate_payment_received WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS aday_ödeme,
+                       cp.firm_payment_amount AS firmaya_iletilen,
+                       CASE cp.firm_payment_sent WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS firma_ödeme,
+                       cp.first_right_status AS birinci_hak,
+                       cp.first_exam_date AS birinci_sınav_tarihi,
+                       cp.second_right_status AS ikinci_hak,
+                       cp.second_exam_date AS ikinci_sınav_tarihi,
+                       cp.entitlement_status AS belge_hakkı,
+                       cp.certificate_print_status AS basım,
+                       cp.certificate_delivery_status AS teslim,
+                       cp.note AS süreç_notu
+                FROM candidate_processes cp
+                JOIN firms f ON f.id=cp.firm_id
+                JOIN qualifications q ON q.id=cp.qualification_id
+                WHERE cp.candidate_id=?
+                ORDER BY cp.id DESC
+            """, (candidate_id,))
+
+            aday_cari = df_query("""
+                SELECT cl.id, cl.transaction_date AS tarih, cl.transaction_type AS tip, cl.category AS kategori,
+                       f.name AS firma,
+                       cl.person_name AS kişi_tedarikçi,
+                       cl.amount AS tutar,
+                       cl.payment_status AS ödeme_durumu,
+                       CASE COALESCE(cl.auto_generated,0) WHEN 1 THEN 'Otomatik' ELSE 'Manuel' END AS kayıt_tipi,
+                       cl.description AS açıklama
+                FROM cash_ledger cl
+                LEFT JOIN firms f ON f.id=cl.firm_id
+                WHERE cl.candidate_id=?
+                ORDER BY cl.transaction_date DESC, cl.id DESC
+            """, (candidate_id,))
+
+            aday_sinav = df_query("""
+                SELECT es.session_type AS tür, es.exam_date AS tarih, es.exam_time AS saat,
+                       es.exam_place AS sınav_yeri, es.myk_exam_id AS myk_sınav_id,
+                       f.name AS firma,
+                       ev.full_name AS değerlendirici,
+                       esc.attendance_status AS katılım,
+                       esc.result_status AS sonuç,
+                       esc.score AS puan
+                FROM exam_session_candidates esc
+                JOIN exam_sessions es ON es.id=esc.session_id
+                LEFT JOIN firms f ON f.id=es.firm_id
+                LEFT JOIN evaluators ev ON ev.id=es.evaluator_id
+                WHERE esc.candidate_id=?
+                ORDER BY es.exam_date DESC, es.exam_time DESC
+            """, (candidate_id,))
+
+            gelir = float(aday_cari[(aday_cari["tip"] == "Gelir") & (aday_cari["ödeme_durumu"] == "Yapıldı")]["tutar"].sum()) if not aday_cari.empty else 0
+            gider = float(aday_cari[(aday_cari["tip"] == "Gider") & (aday_cari["ödeme_durumu"] == "Yapıldı")]["tutar"].sum()) if not aday_cari.empty else 0
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Süreç Sayısı", len(aday_surecler))
+            m2.metric("Sınav Sayısı", len(aday_sinav))
+            m3.metric("Aday Geliri", money_fmt(gelir))
+            m4.metric("Aday Bağlı Gider", money_fmt(gider))
+
+            st.markdown("### Aday Bilgisi")
+            st.dataframe(aday_bilgi, width="stretch")
+
+            st.markdown("### Aday Süreçleri")
+            st.dataframe(aday_surecler, width="stretch")
+
+            st.markdown("### Aday Cari")
+            st.dataframe(aday_cari, width="stretch")
+
+            st.markdown("### Aday Sınavları")
+            st.dataframe(aday_sinav, width="stretch")
+
+            st.download_button(
+                "Bu adaya ait raporu Excel indir",
+                data=to_multi_excel_bytes({
+                    "Aday Bilgisi": aday_bilgi,
+                    "Süreçler": aday_surecler,
+                    "Cari": aday_cari,
+                    "Sınavlar": aday_sinav
+                }),
+                file_name=f"aday_raporu_{candidate_id}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+    with tab4:
+        st.subheader("Aday Finans Timeline")
+
+        candidate_options_tl = options_with_select(
+            get_options("SELECT id, full_name || COALESCE(' / ' || tc_no, '') AS label FROM candidates ORDER BY full_name"),
+            "Seç"
+        )
+        timeline_candidate_label = st.selectbox("Timeline adayı seç", list(candidate_options_tl.keys()), key="timeline_candidate_select")
+
+        if timeline_candidate_label == "Seç":
+            st.info("Timeline görmek için aday seç.")
+        else:
+            candidate_id = candidate_options_tl[timeline_candidate_label]
+
+            timeline = df_query("""
+                SELECT cl.transaction_date AS tarih,
+                       cl.transaction_type AS tip,
+                       cl.category AS kategori,
+                       f.name AS firma,
+                       cl.amount AS tutar,
+                       cl.payment_status AS ödeme_durumu,
+                       CASE COALESCE(cl.auto_generated,0) WHEN 1 THEN 'Otomatik' ELSE 'Manuel' END AS kayıt_tipi,
+                       cl.description AS açıklama
+                FROM cash_ledger cl
+                LEFT JOIN firms f ON f.id=cl.firm_id
+                WHERE cl.candidate_id=?
+                ORDER BY cl.transaction_date, cl.id
+            """, (candidate_id,))
+
+            if timeline.empty:
+                st.info("Bu aday için cari hareket yok.")
+            else:
+                st.dataframe(timeline, width="stretch")
+
+                for _, r in timeline.iterrows():
+                    sign = "+" if r["tip"] == "Gelir" else "-"
+                    st.markdown(
+                        f"**{r['tarih']}** — {r['tip']} / {r['kategori']} — "
+                        f"{r['firma'] or '-'} — **{sign}{money_fmt(r['tutar'])}** "
+                        f"({r['ödeme_durumu']} / {r['kayıt_tipi']})"
+                    )
+
+                download_df_button(timeline, "aday_finans_timeline.xlsx")
 
 
 elif menu == "Ayarlar":
