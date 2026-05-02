@@ -2,7 +2,7 @@ from supabase import create_client
 import streamlit as st
 import sqlite3
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime, timedelta
 import re
 import pandas as pd
 
@@ -69,6 +69,23 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# -------------------- OTURUM ZAMAN AŞIMI --------------------
+SESSION_TIMEOUT_MINUTES = 10
+now_ts = datetime.now()
+
+if "last_activity" not in st.session_state:
+    st.session_state.last_activity = now_ts
+
+if st.session_state.user is not None:
+    inactive_for = now_ts - st.session_state.last_activity
+    if inactive_for > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+        st.session_state.user = None
+        st.session_state.last_activity = now_ts
+        st.warning("10 dakika işlem yapılmadığı için oturum kapatıldı. Lütfen tekrar giriş yap.")
+        st.rerun()
+    else:
+        st.session_state.last_activity = now_ts
 if st.session_state.user is None:
     st.title("Giriş Yap")
 
@@ -604,6 +621,79 @@ def money_fmt(x):
         return "0,00 TL"
 
 
+def sync_auto_ledger_for_process(process_id):
+    """
+    Aday sürecindeki ödeme checkbox'larına göre otomatik cari kaydı üretir.
+    Aynı süreç için eski otomatik kayıtları silip güncel duruma göre yeniden oluşturur.
+    Manuel cari kayıtlarına dokunmaz.
+    """
+    process_id = int(process_id)
+
+    process_df = df_query("""
+        SELECT cp.id AS process_id,
+               cp.candidate_id,
+               cp.firm_id,
+               cp.candidate_payment_amount,
+               cp.candidate_payment_received,
+               cp.firm_payment_amount,
+               cp.firm_payment_sent,
+               c.full_name AS candidate_name,
+               f.name AS firm_name
+        FROM candidate_processes cp
+        JOIN candidates c ON c.id=cp.candidate_id
+        JOIN firms f ON f.id=cp.firm_id
+        WHERE cp.id=?
+    """, (process_id,))
+
+    if process_df.empty:
+        return
+
+    r = process_df.iloc[0]
+
+    execute(
+        "DELETE FROM cash_ledger WHERE candidate_process_id=? AND auto_generated=1",
+        (process_id,)
+    )
+
+    candidate_payment_amount = float(r["candidate_payment_amount"] or 0)
+    firm_payment_amount = float(r["firm_payment_amount"] or 0)
+
+    if int(r["candidate_payment_received"] or 0) == 1 and candidate_payment_amount > 0:
+        execute("""
+            INSERT INTO cash_ledger(
+                transaction_date, transaction_type, category, firm_id, candidate_id, session_id,
+                person_name, candidate_process_id, auto_generated,
+                amount, vat_included, payment_status, description
+            )
+            VALUES (CURRENT_DATE, 'Gelir', 'Aday Ödemesi', ?, ?, NULL, ?, ?, 1, ?, 1, 'Yapıldı', ?)
+        """, (
+            int(r["firm_id"]),
+            int(r["candidate_id"]),
+            str(r["candidate_name"] or ""),
+            process_id,
+            candidate_payment_amount,
+            "Aday sürecinden otomatik oluşturuldu"
+        ))
+
+    if int(r["firm_payment_sent"] or 0) == 1 and firm_payment_amount > 0:
+        execute("""
+            INSERT INTO cash_ledger(
+                transaction_date, transaction_type, category, firm_id, candidate_id, session_id,
+                person_name, candidate_process_id, auto_generated,
+                amount, vat_included, payment_status, description
+            )
+            VALUES (CURRENT_DATE, 'Gider', 'Firmaya Ödeme', ?, ?, NULL, ?, ?, 1, ?, 1, 'Yapıldı', ?)
+        """, (
+            int(r["firm_id"]),
+            int(r["candidate_id"]),
+            str(r["firm_name"] or ""),
+            process_id,
+            firm_payment_amount,
+            "Aday sürecinden otomatik oluşturuldu"
+        ))
+
+
+
 def evaluator_has_conflict(evaluator_id, exam_date, exam_time, exclude_session_id=None):
     if exclude_session_id:
         df = df_query("""
@@ -1041,9 +1131,11 @@ if menu == "Aday Kaydet":
                         certificate_print_status, certificate_delivery_status,
                         process_note
                     ))
+                    new_process_id = int(df_query("SELECT MAX(id) AS id FROM candidate_processes")["id"][0])
+                    sync_auto_ledger_for_process(new_process_id)
                     created += 1
 
-                st.success(f"Aday kaydedildi. Oluşturulan alt birim/yeterlilik süreci: {created}")
+                st.success(f"Aday kaydedildi. Oluşturulan alt birim/yeterlilik süreci: {created}. Cari otomatik güncellendi.")
 
 
 elif menu == "Aday Süreçleri":
@@ -1213,7 +1305,9 @@ elif menu == "Aday Süreçleri":
                             int(selected_id)
                         ))
 
-                        st.success("Aday ve süreç güncellendi.")
+                        sync_auto_ledger_for_process(int(selected_id))
+
+                        st.success("Aday ve süreç güncellendi. Cari otomatik güncellendi.")
                         st.rerun()
 
 
@@ -1590,22 +1684,19 @@ elif menu == "Sınav Takvimi":
         valid_dates = calendar_df.dropna(subset=["tarih_dt"])
 
         if valid_dates.empty:
-            st.dataframe(calendar_df, width="stretch")
+            st.warning("Sınav kayıtları var ama tarih formatı okunamadı. Tüm liste aşağıda gösteriliyor.")
+            st.dataframe(calendar_df.drop(columns=["tarih_dt"], errors="ignore"), width="stretch")
+            download_df_button(calendar_df.drop(columns=["tarih_dt"], errors="ignore"), "tum_sinav_takvimi.xlsx")
         else:
-            min_date = valid_dates["tarih_dt"].min().date()
-            max_date = valid_dates["tarih_dt"].max().date()
-
+            today = date.today()
+            monday = today - timedelta(days=today.weekday())
             selected_week_start = st.date_input(
                 "Hafta başlangıcı",
-                value=min_date,
-                min_value=min_date,
-                max_value=max_date,
+                value=monday,
                 format="DD/MM/YYYY"
             )
-
-            # Pazartesiye çek
-            week_start = selected_week_start - pd.Timedelta(days=selected_week_start.weekday())
-            week_end = week_start + pd.Timedelta(days=6)
+            week_start = selected_week_start - timedelta(days=selected_week_start.weekday())
+            week_end = week_start + timedelta(days=6)
 
             week_df = calendar_df[
                 (calendar_df["tarih_dt"].dt.date >= week_start) &
@@ -1616,12 +1707,12 @@ elif menu == "Sınav Takvimi":
 
             days = [
                 ("Pazartesi", week_start),
-                ("Salı", week_start + pd.Timedelta(days=1)),
-                ("Çarşamba", week_start + pd.Timedelta(days=2)),
-                ("Perşembe", week_start + pd.Timedelta(days=3)),
-                ("Cuma", week_start + pd.Timedelta(days=4)),
-                ("Cumartesi", week_start + pd.Timedelta(days=5)),
-                ("Pazar", week_start + pd.Timedelta(days=6)),
+                ("Salı", week_start + timedelta(days=1)),
+                ("Çarşamba", week_start + timedelta(days=2)),
+                ("Perşembe", week_start + timedelta(days=3)),
+                ("Cuma", week_start + timedelta(days=4)),
+                ("Cumartesi", week_start + timedelta(days=5)),
+                ("Pazar", week_start + timedelta(days=6)),
             ]
 
             weekly_rows = []
@@ -1651,13 +1742,17 @@ elif menu == "Sınav Takvimi":
 
             st.subheader("Haftadaki Sınavlar")
             show_cols = ["tarih", "saat", "tür", "myk_sınav_id", "sınav_yeri", "firma", "değerlendirici", "gözetmen", "kayıt_sayısı", "durum"]
-            st.dataframe(week_df[show_cols], width="stretch")
-            download_df_button(week_df[show_cols], "haftalik_sinav_takvimi.xlsx")
+            if week_df.empty:
+                st.info("Seçili haftada sınav yok.")
+            else:
+                st.dataframe(week_df[show_cols], width="stretch")
+                download_df_button(week_df[show_cols], "haftalik_sinav_takvimi.xlsx")
 
-        st.subheader("Tüm Sınav Takvimi")
-        full_cols = ["tarih", "saat", "tür", "myk_sınav_id", "sınav_yeri", "firma", "değerlendirici", "gözetmen", "kayıt_sayısı", "durum"]
-        st.dataframe(calendar_df[full_cols], width="stretch")
-        download_df_button(calendar_df[full_cols], "tum_sinav_takvimi.xlsx")
+            st.subheader("Tüm Sınav Takvimi")
+            full_cols = ["tarih", "saat", "tür", "myk_sınav_id", "sınav_yeri", "firma", "değerlendirici", "gözetmen", "kayıt_sayısı", "durum"]
+            st.dataframe(calendar_df[full_cols], width="stretch")
+            download_df_button(calendar_df[full_cols], "tum_sinav_takvimi.xlsx")
+
 
 
 elif menu == "Cari Gelir-Gider":
@@ -1666,6 +1761,7 @@ elif menu == "Cari Gelir-Gider":
         st.stop()
 
     st.header("Cari Gelir-Gider")
+    ensure_schema_updates()
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Cari İşlem Ekle")
@@ -1736,9 +1832,10 @@ elif menu == "Cari Gelir-Gider":
             execute("""
                 INSERT INTO cash_ledger(
                     transaction_date, transaction_type, category, firm_id, candidate_id, session_id,
-                    person_name, amount, vat_included, payment_status, description
+                    person_name, candidate_process_id, auto_generated,
+                    amount, vat_included, payment_status, description
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?)
             """, (
                 str(transaction_date), transaction_type, category,
                 firm_options[firm_label], candidate_options[candidate_label], session_options[session_label],
@@ -1758,6 +1855,7 @@ elif menu == "Cari Gelir-Gider":
                cl.amount AS tutar,
                CASE cl.vat_included WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS kdv_dahil,
                cl.payment_status AS ödeme_durumu,
+               CASE COALESCE(cl.auto_generated,0) WHEN 1 THEN 'Otomatik' ELSE 'Manuel' END AS kayıt_tipi,
                cl.description AS açıklama
         FROM cash_ledger cl
         LEFT JOIN firms f ON f.id=cl.firm_id
@@ -1795,20 +1893,26 @@ elif menu == "Excel Kaynak Yükleme":
 
     st.header("Excel Kaynak Yükleme")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        if DEFAULT_EXCEL.exists():
-            st.success("Paket içindeki kaynak Excel bulundu.")
-            if st.button("Paket içindeki Excel’i içe aktar"):
-                imported, skipped = import_meslekler_excel(DEFAULT_EXCEL)
-                st.success(f"İçe aktarma tamamlandı. İşlenen satır: {imported}, atlanan satır: {skipped}")
-        else:
-            st.warning("Paket içindeki Excel bulunamadı.")
-    with c2:
-        uploaded = st.file_uploader("Aynı formatta başka Excel yükle", type=["xlsx"])
-        if uploaded is not None and st.button("Yüklenen Excel’i içe aktar"):
-            imported, skipped = import_meslekler_excel(uploaded)
-            st.success(f"İçe aktarma tamamlandı. İşlenen satır: {imported}, atlanan satır: {skipped}")
+    counts = {
+        "Firma": int(df_query("SELECT COUNT(*) c FROM firms")["c"][0]),
+        "Yeterlilik": int(df_query("SELECT COUNT(*) c FROM qualifications")["c"][0]),
+        "Ücret Kaydı": int(df_query("SELECT COUNT(*) c FROM exam_fees")["c"][0]),
+    }
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Firma", counts["Firma"])
+    c2.metric("Yeterlilik", counts["Yeterlilik"])
+    c3.metric("Ücret Kaydı", counts["Ücret Kaydı"])
+
+    if counts["Ücret Kaydı"] > 0:
+        st.success("Kaynak veriler yüklü görünüyor. Yeniden yükleme yapmana gerek yok.")
+        st.info("Yeni Excel yüklemek sadece eksik/yeni tanımları ekler ve aynı firma+yeterlilik ücretlerini günceller.")
+    else:
+        st.warning("Henüz kaynak veri yok. Excel yükleyip içe aktar.")
+
+    uploaded = st.file_uploader("Kaynak Excel yükle", type=["xlsx"])
+    if uploaded is not None and st.button("Yüklenen Excel’i içe aktar"):
+        imported, skipped = import_meslekler_excel(uploaded)
+        st.success(f"İçe aktarma tamamlandı. İşlenen satır: {imported}, atlanan satır: {skipped}")
 
     st.subheader("Import Log")
     logs = df_query("SELECT * FROM import_logs ORDER BY id DESC")
