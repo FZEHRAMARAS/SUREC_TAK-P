@@ -601,6 +601,49 @@ def auto_update_observer_required(session_id):
     execute("UPDATE exam_sessions SET observer_required=? WHERE id=?", (required, int(session_id)))
     return required, count
 
+
+def create_exam_session_with_candidates(
+    session_type,
+    exam_date,
+    exam_time,
+    exam_place,
+    myk_exam_id,
+    selected_qids,
+    firm_id,
+    evaluator_id,
+    status,
+    note,
+    selected_ref_process_ids,
+    reference_candidate_id
+):
+    execute("""
+        INSERT INTO exam_sessions(
+            session_type, exam_date, exam_time, exam_place, myk_exam_id,
+            qualification_id, firm_id, evaluator_id, status, note
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        session_type, str(exam_date), str(exam_time), exam_place, myk_exam_id,
+        selected_qids[0], firm_id, evaluator_id, status, note
+    ))
+
+    new_session_id = int(df_query("SELECT MAX(id) AS id FROM exam_sessions")["id"][0])
+
+    for qid in selected_qids:
+        execute("""
+            INSERT OR IGNORE INTO exam_session_qualifications(session_id, qualification_id)
+            VALUES (?, ?)
+        """, (new_session_id, qid))
+
+    for process_id in selected_ref_process_ids:
+        execute("""
+            INSERT OR IGNORE INTO exam_session_candidates(session_id, candidate_process_id, candidate_id)
+            VALUES (?, ?, ?)
+        """, (new_session_id, process_id, reference_candidate_id))
+
+    auto_update_observer_required(new_session_id)
+    return new_session_id
+
 def upsert_firm(name):
     name = normalize_text(name).upper()
     if not name:
@@ -986,7 +1029,8 @@ elif menu == "Aday Süreçleri":
         params = (f"%{search.strip().upper()}%", f"%{search.strip()}%")
 
     df = df_query(f"""
-        SELECT cp.id AS süreç_id, c.full_name AS aday, c.tc_no AS tc, c.age AS yaş, c.phone AS telefon,
+        SELECT cp.id AS süreç_id, c.id AS aday_id, c.full_name AS aday, c.tc_no AS tc, c.birth_date AS doğum_tarihi,
+               c.age AS yaş, c.phone AS telefon,
                cs.name AS aday_kaynağı,
                CASE WHEN q.code != '' THEN q.code || ' - ' || q.name ELSE q.name END AS yeterlilik,
                q.alt_units AS alt_birimler,
@@ -1004,6 +1048,8 @@ elif menu == "Aday Süreçleri":
                CASE cp.certificate_fee_paid WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS belge_parası,
                cp.certificate_print_status AS basım,
                cp.certificate_delivery_status AS teslim,
+               cp.note AS süreç_notu,
+               c.note AS aday_notu,
                cp.created_at AS kayıt_tarihi
         FROM candidate_processes cp
         JOIN candidates c ON c.id=cp.candidate_id
@@ -1016,28 +1062,131 @@ elif menu == "Aday Süreçleri":
     st.dataframe(df, width="stretch")
     download_df_button(df, "aday_surecleri.xlsx")
 
-    st.subheader("Hızlı Güncelle")
+    st.subheader("Aday / Süreç Güncelle")
     if not df.empty:
-        selected_id = st.selectbox("Süreç ID", df["süreç_id"].tolist())
-        with st.form("update_form"):
-            u1, u2, u3 = st.columns(3)
-            with u1:
-                first = st.selectbox("1. hak", ["Planlanmadı", "Planlandı", "Başarılı", "Başarısız", "Katılmadı", "İptal"])
-                second = st.selectbox("2. hak", ["Planlanmadı", "Planlandı", "Başarılı", "Başarısız", "Katılmadı", "İptal"])
-            with u2:
-                entitlement = st.selectbox("Belge hakkı", ["Bekliyor", "Hak kazandı", "Hak kazanamadı"])
-                cert_paid = st.checkbox("Belge parasını ödedi")
-            with u3:
-                print_status = st.selectbox("Basım", ["Başlamadı", "Basımda", "Geldi"])
-                delivery = st.selectbox("Teslim", ["Teslim edilmedi", "Teslim edildi"])
-            if st.form_submit_button("Güncelle"):
-                execute("""
-                    UPDATE candidate_processes
-                    SET first_right_status=?, second_right_status=?, entitlement_status=?,
-                        certificate_fee_paid=?, certificate_print_status=?, certificate_delivery_status=?
-                    WHERE id=?
-                """, (first, second, entitlement, 1 if cert_paid else 0, print_status, delivery, int(selected_id)))
-                st.success("Güncellendi. Sayfayı yenile.")
+        selected_id = st.selectbox("Güncellenecek Süreç ID", ["Seç"] + [str(x) for x in df["süreç_id"].tolist()])
+        if selected_id != "Seç":
+            detail = df_query("""
+                SELECT cp.*, c.full_name, c.tc_no, c.birth_date, c.age, c.phone, c.note AS candidate_note, c.source_id,
+                       q.code, q.name AS qualification_name, q.alt_units,
+                       f.name AS firm_name
+                FROM candidate_processes cp
+                JOIN candidates c ON c.id=cp.candidate_id
+                JOIN qualifications q ON q.id=cp.qualification_id
+                JOIN firms f ON f.id=cp.firm_id
+                WHERE cp.id=?
+            """, (int(selected_id),))
+
+            if not detail.empty:
+                row = detail.iloc[0]
+
+                source_options = options_with_select(
+                    get_options("SELECT id, name AS label FROM candidate_sources WHERE status='Aktif' ORDER BY name"),
+                    "Seç"
+                )
+                source_labels = list(source_options.keys())
+                current_source_label = "Seç"
+                for label, sid in source_options.items():
+                    if sid == row["source_id"]:
+                        current_source_label = label
+                        break
+
+                with st.form("candidate_process_edit_form"):
+                    st.markdown("### Aday Bilgileri")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        edit_full_name = st.text_input("Ad Soyad", value=str(row["full_name"] or ""))
+                        edit_tc_no = st.text_input("TC No", value=str(row["tc_no"] or ""))
+                        current_birth = pd.to_datetime(row["birth_date"], errors="coerce")
+                        edit_birth_date = st.date_input(
+                            "Doğum tarihi",
+                            value=current_birth.date() if not pd.isna(current_birth) else date(2000, 1, 1),
+                            min_value=date(1930, 1, 1),
+                            max_value=date.today(),
+                            format="DD/MM/YYYY"
+                        )
+                        edit_age = calculate_age(edit_birth_date)
+                        st.info(f"Otomatik yaş: {edit_age}")
+                    with c2:
+                        edit_phone = st.text_input("Telefon", value=str(row["phone"] or ""))
+                        edit_source_label = st.selectbox(
+                            "Aday kaynağı / kimden geldi",
+                            source_labels,
+                            index=source_labels.index(current_source_label) if current_source_label in source_labels else 0
+                        )
+                        edit_candidate_note = st.text_area("Aday notu", value=str(row["candidate_note"] or ""))
+
+                    st.markdown("### Süreç Bilgileri")
+                    st.info(f"Yeterlilik: {row['code'] or ''} {row['qualification_name']} / {row['alt_units'] or 'Genel'} | Firma: {row['firm_name']}")
+
+                    s1, s2, s3 = st.columns(3)
+                    with s1:
+                        edit_candidate_payment_amount = st.number_input("Adaydan alınan ödeme", min_value=0.0, step=100.0, value=float(row["candidate_payment_amount"] or 0))
+                        edit_candidate_payment_received = st.checkbox("Adaydan ödeme alındı", value=bool(row["candidate_payment_received"]))
+                        edit_firm_payment_amount = st.number_input("Firmaya iletilen ödeme", min_value=0.0, step=100.0, value=float(row["firm_payment_amount"] or 0))
+                        edit_firm_payment_sent = st.checkbox("Firmaya ödeme iletildi", value=bool(row["firm_payment_sent"]))
+                    with s2:
+                        status_options = ["Planlanmadı", "Planlandı", "Başarılı", "Başarısız", "Katılmadı", "İptal"]
+                        edit_first = st.selectbox("1. hak", status_options, index=status_options.index(row["first_right_status"]) if row["first_right_status"] in status_options else 0)
+                        edit_second = st.selectbox("2. hak", status_options, index=status_options.index(row["second_right_status"]) if row["second_right_status"] in status_options else 0)
+                        entitlement_options = ["Bekliyor", "Hak kazandı", "Hak kazanamadı"]
+                        edit_entitlement = st.selectbox("Belge hakkı", entitlement_options, index=entitlement_options.index(row["entitlement_status"]) if row["entitlement_status"] in entitlement_options else 0)
+                    with s3:
+                        edit_cert_paid = st.checkbox("Belge parasını ödedi", value=bool(row["certificate_fee_paid"]))
+                        print_options = ["Başlamadı", "Basımda", "Geldi"]
+                        edit_print_status = st.selectbox("Basım", print_options, index=print_options.index(row["certificate_print_status"]) if row["certificate_print_status"] in print_options else 0)
+                        delivery_options = ["Teslim edilmedi", "Teslim edildi"]
+                        edit_delivery = st.selectbox("Teslim", delivery_options, index=delivery_options.index(row["certificate_delivery_status"]) if row["certificate_delivery_status"] in delivery_options else 0)
+
+                    edit_process_note = st.text_area("Süreç notu", value=str(row["note"] or ""))
+
+                    submitted = st.form_submit_button("Aday ve Süreci Güncelle")
+
+                if submitted:
+                    if not edit_full_name.strip():
+                        st.error("Ad Soyad zorunludur.")
+                    else:
+                        execute("""
+                            UPDATE candidates
+                            SET full_name=?, tc_no=?, birth_date=?, age=?, phone=?, source_id=?, note=?
+                            WHERE id=?
+                        """, (
+                            edit_full_name.strip().upper(),
+                            edit_tc_no.strip() or None,
+                            str(edit_birth_date),
+                            edit_age,
+                            edit_phone.strip(),
+                            source_options[edit_source_label],
+                            edit_candidate_note,
+                            int(row["candidate_id"])
+                        ))
+
+                        execute("""
+                            UPDATE candidate_processes
+                            SET candidate_payment_amount=?, candidate_payment_received=?,
+                                firm_payment_amount=?, firm_payment_sent=?,
+                                first_right_status=?, second_right_status=?,
+                                entitlement_status=?, certificate_fee_paid=?,
+                                certificate_print_status=?, certificate_delivery_status=?,
+                                note=?
+                            WHERE id=?
+                        """, (
+                            edit_candidate_payment_amount,
+                            1 if edit_candidate_payment_received else 0,
+                            edit_firm_payment_amount,
+                            1 if edit_firm_payment_sent else 0,
+                            edit_first,
+                            edit_second,
+                            edit_entitlement,
+                            1 if edit_cert_paid else 0,
+                            edit_print_status,
+                            edit_delivery,
+                            edit_process_note,
+                            int(selected_id)
+                        ))
+
+                        st.success("Aday ve süreç güncellendi.")
+                        st.rerun()
 
 
 elif menu == "Sınav Planlama":
@@ -1099,7 +1248,13 @@ elif menu == "Sınav Planlama":
         st.success(f"Otomatik firma: {selected_process['firm_name']}")
         st.info(f"Referans meslek: {ref_code + ' - ' if normalize_text(ref_code) else ''}{ref_name}")
 
-        session_type = st.selectbox("Sınav türü", ["Teorik", "Performans"])
+        plan_mode = st.selectbox(
+            "Planlama türü",
+            ["Seç", "Teorik + Performans birlikte", "Sadece Teorik", "Sadece Performans"]
+        )
+        if plan_mode == "Seç":
+            st.info("Lütfen planlama türü seç.")
+            st.stop()
 
         # Aynı aday + aynı firma + aynı meslek için seçilebilir alt birimler.
         possible_q_df = df_query("""
@@ -1113,14 +1268,17 @@ elif menu == "Sınav Planlama":
 
         q_label_to_ids = {str(r["alt_label"]): (int(r["qualification_id"]), int(r["process_id"])) for _, r in possible_q_df.iterrows()}
 
-        if session_type == "Performans":
+        if plan_mode in ["Teorik + Performans birlikte", "Sadece Performans"]:
             selected_alt_labels = st.multiselect(
                 "Performans sınavında yer alacak alt birimler",
                 list(q_label_to_ids.keys()),
                 default=list(q_label_to_ids.keys())
             )
         else:
-            selected_alt_single = st.selectbox("Teorik sınav için alt birim/yeterlilik", list(q_label_to_ids.keys()))
+            selected_alt_single = st.selectbox("Teorik sınav için alt birim/yeterlilik", ["Seç"] + list(q_label_to_ids.keys()))
+            if selected_alt_single == "Seç":
+                st.info("Lütfen teorik sınav için alt birim/yeterlilik seç.")
+                st.stop()
             selected_alt_labels = [selected_alt_single]
 
         selected_qids = [q_label_to_ids[x][0] for x in selected_alt_labels]
@@ -1130,63 +1288,114 @@ elif menu == "Sınav Planlama":
             st.warning("En az bir alt birim/yeterlilik seçmelisin.")
 
         with st.form("create_exam_session"):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                exam_date = st.date_input("Sınav tarihi", value=date.today(), format="DD/MM/YYYY")
-                exam_time = st.time_input("Sınav saati")
-            with c2:
-                exam_place = st.text_input("Sınav yeri")
-                myk_exam_id = st.text_input("MYK sınav ID")
-                status = st.selectbox("Durum", ["Planlandı", "Tamamlandı", "İptal"])
-            with c3:
-                eval_label = st.selectbox("Değerlendirici", ["Seç"] + list(evaluator_options.keys()))
-                st.text_input("Firma", value=str(selected_process["firm_name"]), disabled=True)
-                st.text_area("Seçilen alt birimler", value="\\n".join(selected_alt_labels), disabled=True)
+            status = st.selectbox("Durum", ["Planlandı", "Tamamlandı", "İptal"])
+            exam_place = st.text_input("Sınav yeri")
+            eval_label = st.selectbox("Değerlendirici", ["Seç"] + list(evaluator_options.keys()))
+            st.text_input("Firma", value=str(selected_process["firm_name"]), disabled=True)
+            st.text_area("Seçilen alt birimler", value="\\n".join(selected_alt_labels), disabled=True)
+
+            if plan_mode == "Teorik + Performans birlikte":
+                st.markdown("### Teorik Sınav")
+                t1, t2, t3 = st.columns(3)
+                with t1:
+                    teorik_date = st.date_input("Teorik sınav tarihi", value=date.today(), format="DD/MM/YYYY")
+                with t2:
+                    teorik_time = st.time_input("Teorik sınav saati")
+                with t3:
+                    teorik_myk_exam_id = st.text_input("Teorik MYK sınav ID")
+
+                st.markdown("### Performans Sınavı")
+                p1, p2, p3 = st.columns(3)
+                with p1:
+                    performans_date = st.date_input("Performans sınav tarihi", value=date.today(), format="DD/MM/YYYY")
+                with p2:
+                    performans_time = st.time_input("Performans sınav saati")
+                with p3:
+                    performans_myk_exam_id = st.text_input("Performans MYK sınav ID")
+
+            else:
+                st.markdown("### Sınav Bilgileri")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    exam_date = st.date_input("Sınav tarihi", value=date.today(), format="DD/MM/YYYY")
+                with c2:
+                    exam_time = st.time_input("Sınav saati")
+                with c3:
+                    myk_exam_id = st.text_input("MYK sınav ID")
 
             note = st.text_area("Sınav notu")
 
             if st.form_submit_button("Sınav Oturumu Oluştur ve Referans Adayı Ekle"):
                 if not selected_qids:
                     st.error("Alt birim/yeterlilik seçmeden sınav oluşturulamaz.")
+                elif eval_label == "Seç":
+                    st.error("Değerlendirici seçmelisin.")
                 else:
-                    if eval_label == "Seç":
-                        st.error("Değerlendirici seçmelisin.")
-                        st.stop()
-
                     evaluator_id = evaluator_options[eval_label]
-                    conflict_df = evaluator_has_conflict(evaluator_id, str(exam_date), str(exam_time))
 
-                    if session_type == "Performans" and not conflict_df.empty:
-                        st.error("Değerlendirici çakışması var. Bu değerlendirici aynı gün ve aynı saatte başka bir sınava atanmış. Sınav oturumu oluşturulmadı.")
-                        st.dataframe(conflict_df, width="stretch")
-                    else:
-                        execute("""
-                            INSERT INTO exam_sessions(
-                                session_type, exam_date, exam_time, exam_place, myk_exam_id,
-                                qualification_id, firm_id, evaluator_id, status, note
+                    if plan_mode == "Teorik + Performans birlikte":
+                        conflict_teorik = pd.DataFrame()
+                        conflict_performans = evaluator_has_conflict(evaluator_id, str(performans_date), str(performans_time))
+
+                        if not conflict_performans.empty:
+                            st.error("Değerlendirici çakışması var. Bu değerlendirici performans sınavı saatinde başka sınava atanmış. Sınavlar oluşturulmadı.")
+                            st.dataframe(conflict_performans, width="stretch")
+                        else:
+                            teorik_id = create_exam_session_with_candidates(
+                                "Teorik",
+                                teorik_date,
+                                teorik_time,
+                                exam_place,
+                                teorik_myk_exam_id,
+                                selected_qids,
+                                firm_id,
+                                evaluator_id,
+                                status,
+                                note,
+                                selected_ref_process_ids,
+                                reference_candidate_id
                             )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            session_type, str(exam_date), str(exam_time), exam_place, myk_exam_id,
-                            selected_qids[0], firm_id, evaluator_id, status, note
-                        ))
 
-                        new_session_id = int(df_query("SELECT MAX(id) AS id FROM exam_sessions")["id"][0])
+                            performans_id = create_exam_session_with_candidates(
+                                "Performans",
+                                performans_date,
+                                performans_time,
+                                exam_place,
+                                performans_myk_exam_id,
+                                selected_qids,
+                                firm_id,
+                                evaluator_id,
+                                status,
+                                note,
+                                selected_ref_process_ids,
+                                reference_candidate_id
+                            )
 
-                        for qid in selected_qids:
-                            execute("""
-                                INSERT OR IGNORE INTO exam_session_qualifications(session_id, qualification_id)
-                                VALUES (?, ?)
-                            """, (new_session_id, qid))
+                            st.success(f"Teorik ve performans sınavları oluşturuldu. Teorik ID: {teorik_id}, Performans ID: {performans_id}")
 
-                        for process_id in selected_ref_process_ids:
-                            execute("""
-                                INSERT OR IGNORE INTO exam_session_candidates(session_id, candidate_process_id, candidate_id)
-                                VALUES (?, ?, ?)
-                            """, (new_session_id, process_id, reference_candidate_id))
+                    else:
+                        session_type = "Teorik" if plan_mode == "Sadece Teorik" else "Performans"
+                        conflict_df = evaluator_has_conflict(evaluator_id, str(exam_date), str(exam_time))
 
-                        auto_update_observer_required(new_session_id)
-                        st.success("Sınav oturumu oluşturuldu ve referans adayın seçilen alt birim süreçleri eklendi.")
+                        if session_type == "Performans" and not conflict_df.empty:
+                            st.error("Değerlendirici çakışması var. Bu değerlendirici aynı gün ve aynı saatte başka bir sınava atanmış. Sınav oturumu oluşturulmadı.")
+                            st.dataframe(conflict_df, width="stretch")
+                        else:
+                            session_id = create_exam_session_with_candidates(
+                                session_type,
+                                exam_date,
+                                exam_time,
+                                exam_place,
+                                myk_exam_id,
+                                selected_qids,
+                                firm_id,
+                                evaluator_id,
+                                status,
+                                note,
+                                selected_ref_process_ids,
+                                reference_candidate_id
+                            )
+                            st.success(f"{session_type} sınav oturumu oluşturuldu. Oturum ID: {session_id}")
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
