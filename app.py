@@ -187,7 +187,6 @@ def execute(sql, params=()):
         firm_id INTEGER,
         candidate_id INTEGER,
         session_id INTEGER,
-        person_name TEXT,
         amount REAL NOT NULL DEFAULT 0,
         vat_included INTEGER DEFAULT 1,
         payment_status TEXT DEFAULT 'Bekliyor',
@@ -277,7 +276,6 @@ def init_db():
         birth_date TEXT,
         age INTEGER,
         phone TEXT,
-        source_id INTEGER,
         note TEXT,
         created_at TEXT DEFAULT CURRENT_DATE
     )
@@ -427,7 +425,6 @@ def ensure_v4_tables():
         firm_id INTEGER,
         candidate_id INTEGER,
         session_id INTEGER,
-        person_name TEXT,
         amount REAL NOT NULL DEFAULT 0,
         vat_included INTEGER DEFAULT 1,
         payment_status TEXT DEFAULT 'Bekliyor',
@@ -464,20 +461,6 @@ def ensure_column(table, column, definition):
     conn.close()
 
 def ensure_schema_updates():
-    conn = connect()
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS candidate_sources (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        source_type TEXT DEFAULT 'Firma',
-        status TEXT DEFAULT 'Aktif',
-        note TEXT
-    )
-    """)
-    conn.commit()
-    conn.close()
-
     ensure_column("candidates", "source_id", "INTEGER")
     ensure_column("cash_ledger", "person_name", "TEXT")
 
@@ -802,7 +785,11 @@ if menu == "Aday Kaydet":
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.subheader("2) Meslek / Alt Birimler / Firma")
 
-        meslek_label = st.selectbox("Meslek / Yeterlilik seçimi *", list(meslek_options.keys()))
+        meslek_label = st.selectbox("Meslek / Yeterlilik seçimi *", ["Seç"] + list(meslek_options.keys()))
+        if meslek_label == "Seç":
+            st.info("Lütfen meslek / yeterlilik seç.")
+            st.stop()
+
         any_qid = meslek_options[meslek_label]
         selected_q = df_query("SELECT code, name FROM qualifications WHERE id=?", (any_qid,))
         selected_code = selected_q["code"][0]
@@ -856,23 +843,29 @@ if menu == "Aday Kaydet":
             if not firm_labels:
                 st.error("Seçilen alt birimlerin tamamı için ortak firma bulunamadı. Alt birim seçimini azalt veya ücret tanımlarını kontrol et.")
             else:
-                firm_label = st.selectbox("Firma seçimi *", list(firm_labels.keys()))
-                firm_id = firm_labels[firm_label]
-                selected_firm_name = firm_label
+                firm_label = st.selectbox("Firma seçimi *", ["Seç"] + list(firm_labels.keys()))
+                if firm_label == "Seç":
+                    st.info("Lütfen firma seç.")
+                    firm_id = None
+                    selected_firm_name = ""
+                else:
+                    firm_id = firm_labels[firm_label]
+                    selected_firm_name = firm_label
 
                 fee_rows = []
-                for qid in selected_qualification_ids:
-                    row = df_query("""
-                        SELECT ef.id AS fee_id, q.id AS qualification_id,
-                               CASE WHEN q.code != '' THEN q.code || ' - ' || q.name ELSE q.name END AS qualification,
-                               q.alt_units,
-                               ef.fee_without_vat, ef.vat_rate, ef.fee_with_vat
-                        FROM exam_fees ef
-                        JOIN qualifications q ON q.id=ef.qualification_id
-                        WHERE ef.qualification_id=? AND ef.firm_id=?
-                    """, (qid, firm_id))
-                    if not row.empty:
-                        fee_rows.append(row.iloc[0])
+                if firm_id:
+                    for qid in selected_qualification_ids:
+                        row = df_query("""
+                            SELECT ef.id AS fee_id, q.id AS qualification_id,
+                                   CASE WHEN q.code != '' THEN q.code || ' - ' || q.name ELSE q.name END AS qualification,
+                                   q.alt_units,
+                                   ef.fee_without_vat, ef.vat_rate, ef.fee_with_vat
+                            FROM exam_fees ef
+                            JOIN qualifications q ON q.id=ef.qualification_id
+                            WHERE ef.qualification_id=? AND ef.firm_id=?
+                        """, (qid, firm_id))
+                        if not row.empty:
+                            fee_rows.append(row.iloc[0])
 
                 fee_preview = pd.DataFrame(fee_rows)
                 if not fee_preview.empty:
@@ -1090,7 +1083,11 @@ elif menu == "Sınav Planlama":
             tc_label = f" / {r['tc_no']}" if normalize_text(r["tc_no"]) else ""
             process_labels.append(f"{r['candidate_name']}{tc_label} | {qual_label}{alt_label} | Firma: {r['firm_name']}")
 
-        selected_process_label = st.selectbox("Referans aday/süreç seç", process_labels)
+        selected_process_label = st.selectbox("Referans aday/süreç seç", ["Seç"] + process_labels)
+        if selected_process_label == "Seç":
+            st.info("Lütfen referans aday/süreç seç.")
+            st.stop()
+
         selected_process = process_df.iloc[process_labels.index(selected_process_label)]
 
         selected_process_id = int(selected_process["process_id"])
@@ -1142,7 +1139,7 @@ elif menu == "Sınav Planlama":
                 myk_exam_id = st.text_input("MYK sınav ID")
                 status = st.selectbox("Durum", ["Planlandı", "Tamamlandı", "İptal"])
             with c3:
-                eval_label = st.selectbox("Değerlendirici", list(evaluator_options.keys()))
+                eval_label = st.selectbox("Değerlendirici", ["Seç"] + list(evaluator_options.keys()))
                 st.text_input("Firma", value=str(selected_process["firm_name"]), disabled=True)
                 st.text_area("Seçilen alt birimler", value="\\n".join(selected_alt_labels), disabled=True)
 
@@ -1152,6 +1149,10 @@ elif menu == "Sınav Planlama":
                 if not selected_qids:
                     st.error("Alt birim/yeterlilik seçmeden sınav oluşturulamaz.")
                 else:
+                    if eval_label == "Seç":
+                        st.error("Değerlendirici seçmelisin.")
+                        st.stop()
+
                     evaluator_id = evaluator_options[eval_label]
                     conflict_df = evaluator_has_conflict(evaluator_id, str(exam_date), str(exam_time))
 
@@ -1208,7 +1209,11 @@ elif menu == "Sınav Planlama":
         st.info("Önce sınav oturumu oluştur.")
     else:
         session_labels = {str(r["label"]): int(r["id"]) for _, r in sessions_df.iterrows()}
-        selected_session_label = st.selectbox("Sınav oturumu", list(session_labels.keys()))
+        selected_session_label = st.selectbox("Sınav oturumu", ["Seç"] + list(session_labels.keys()))
+        if selected_session_label == "Seç":
+            st.info("Lütfen sınav oturumu seç.")
+            st.stop()
+
         selected_session_id = session_labels[selected_session_label]
         selected_session = sessions_df[sessions_df["id"] == selected_session_id].iloc[0]
 
@@ -1506,6 +1511,7 @@ elif menu == "Cari Gelir-Gider":
                cl.person_name AS kişi_tedarikçi,
                f.name AS firma, c.full_name AS aday,
                es.exam_date || ' ' || es.exam_time || ' / ' || COALESCE(es.myk_exam_id, '') AS sınav,
+               cl.person_name AS kişi_tedarikçi,
                cl.amount AS tutar,
                CASE cl.vat_included WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS kdv_dahil,
                cl.payment_status AS ödeme_durumu,
@@ -1560,13 +1566,6 @@ elif menu == "Excel Kaynak Yükleme":
         if uploaded is not None and st.button("Yüklenen Excel’i içe aktar"):
             imported, skipped = import_meslekler_excel(uploaded)
             st.success(f"İçe aktarma tamamlandı. İşlenen satır: {imported}, atlanan satır: {skipped}")
-
-    st.subheader("Kaynak Önizleme")
-    try:
-        preview = pd.read_excel(DEFAULT_EXCEL, sheet_name="Temiz Liste", nrows=20)
-        st.dataframe(preview, width="stretch")
-    except Exception as e:
-        st.error(f"Önizleme okunamadı: {e}")
 
     st.subheader("Import Log")
     logs = df_query("SELECT * FROM import_logs ORDER BY id DESC")
