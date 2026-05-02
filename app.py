@@ -627,6 +627,9 @@ def sync_auto_ledger_for_process(process_id):
     Aynı süreç için eski otomatik kayıtları silip güncel duruma göre yeniden oluşturur.
     Manuel cari kayıtlarına dokunmaz.
     """
+    # Canlı Streamlit'te eski aday_takip.db kalmışsa eksik cari kolonlarını burada garanti ekle.
+    ensure_schema_updates()
+
     process_id = int(process_id)
 
     process_df = df_query("""
