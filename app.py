@@ -29,6 +29,34 @@ def login_user(email, password):
         st.error("Supabase giriş hatası:")
         st.write(e)
         return None
+
+
+def create_auth_user_and_profile(email, password, role):
+    """
+    Streamlit Cloud'da service_role kullanmadan kullanıcı oluşturur.
+    Supabase Auth sign_up user döndürürse profiles tablosunu hemen upsert eder.
+    Eğer Supabase e-posta onayı açıksa kullanıcı ilk girişten önce mail onayı gerekebilir.
+    """
+    email = email.strip().lower()
+    password = password.strip()
+
+    response = supabase.auth.sign_up({
+        "email": email,
+        "password": password
+    })
+
+    created_user_id = None
+    if getattr(response, "user", None) is not None:
+        created_user_id = response.user.id
+
+    if created_user_id:
+        supabase.table("profiles").upsert({
+            "id": created_user_id,
+            "email": email,
+            "role": role
+        }).execute()
+
+    return response
 if "user" not in st.session_state:
     st.session_state.user = None
 
@@ -1669,50 +1697,57 @@ elif menu == "Cari Gelir-Gider":
         "Diğer Gider"
     ]
 
-    with st.form("ledger_form"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            transaction_date = st.date_input("Tarih", value=date.today(), format="DD/MM/YYYY")
-            transaction_type = st.selectbox("İşlem tipi", ["Seç", "Gelir", "Gider"])
-            if transaction_type == "Gelir":
-                category = st.selectbox("Kategori", ["Seç"] + gelir_kategorileri)
-            elif transaction_type == "Gider":
-                category = st.selectbox("Kategori", ["Seç"] + gider_kategorileri)
-            else:
-                category = st.selectbox("Kategori", ["Seç"])
-        with c2:
-            firm_label = st.selectbox("Firma", list(firm_options.keys()))
-            candidate_label = st.selectbox("Aday", list(candidate_options.keys()))
-            session_label = st.selectbox("Sınav", list(session_options.keys()))
-        with c3:
-            person_name = st.text_input("Kişi / tedarikçi / açıklama adı")
-            amount = st.number_input("Tutar", min_value=0.0, step=100.0)
-            vat_included = st.checkbox("KDV dahil", value=True)
-            payment_status = st.selectbox("Ödeme durumu", ["Seç", "Bekliyor", "Yapıldı", "İptal"])
+    c1, c2, c3 = st.columns(3)
 
-        description = st.text_area("Açıklama")
-        if st.form_submit_button("Cari İşlemi Kaydet"):
-            if transaction_type == "Seç":
-                st.error("İşlem tipi seçmelisin.")
-            elif category == "Seç":
-                st.error("Kategori seçmelisin.")
-            elif payment_status == "Seç":
-                st.error("Ödeme durumu seçmelisin.")
-            elif amount <= 0:
-                st.error("Tutar 0'dan büyük olmalı.")
-            else:
-                execute("""
-                    INSERT INTO cash_ledger(
-                        transaction_date, transaction_type, category, firm_id, candidate_id, session_id,
-                        amount, vat_included, payment_status, description, person_name
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    str(transaction_date), transaction_type, category,
-                    firm_options[firm_label], candidate_options[candidate_label], session_options[session_label],
-                    amount, 1 if vat_included else 0, payment_status, description, person_name.strip()
-                ))
-                st.success("Cari işlem kaydedildi.")
+    with c1:
+        transaction_date = st.date_input("Tarih", value=date.today(), format="DD/MM/YYYY")
+        transaction_type = st.selectbox("İşlem tipi", ["Seç", "Gelir", "Gider"], key="ledger_transaction_type")
+
+        if transaction_type == "Gelir":
+            category = st.selectbox("Kategori", ["Seç"] + gelir_kategorileri, key="ledger_category_income")
+        elif transaction_type == "Gider":
+            category = st.selectbox("Kategori", ["Seç"] + gider_kategorileri, key="ledger_category_expense")
+        else:
+            category = st.selectbox("Kategori", ["Seç"], key="ledger_category_empty")
+
+    with c2:
+        firm_label = st.selectbox("Firma", list(firm_options.keys()), key="ledger_firm")
+        candidate_label = st.selectbox("Aday", list(candidate_options.keys()), key="ledger_candidate")
+        session_label = st.selectbox("Sınav", list(session_options.keys()), key="ledger_session")
+
+    with c3:
+        person_name = st.text_input("Kişi / tedarikçi / açıklama adı", key="ledger_person")
+        amount = st.number_input("Tutar", min_value=0.0, step=100.0, key="ledger_amount")
+        vat_included = st.checkbox("KDV dahil", value=True, key="ledger_vat")
+        payment_status = st.selectbox("Ödeme durumu", ["Seç", "Bekliyor", "Yapıldı", "İptal"], key="ledger_payment_status")
+
+    description = st.text_area("Açıklama", key="ledger_description")
+
+    if st.button("Cari İşlemi Kaydet"):
+        if transaction_type == "Seç":
+            st.error("İşlem tipi seçmelisin.")
+        elif category == "Seç":
+            st.error("Kategori seçmelisin.")
+        elif payment_status == "Seç":
+            st.error("Ödeme durumu seçmelisin.")
+        elif amount <= 0:
+            st.error("Tutar 0'dan büyük olmalı.")
+        else:
+            execute("""
+                INSERT INTO cash_ledger(
+                    transaction_date, transaction_type, category, firm_id, candidate_id, session_id,
+                    person_name, amount, vat_included, payment_status, description
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                str(transaction_date), transaction_type, category,
+                firm_options[firm_label], candidate_options[candidate_label], session_options[session_label],
+                person_name.strip(),
+                amount, 1 if vat_included else 0, payment_status, description
+            ))
+            st.success("Cari işlem kaydedildi.")
+            st.rerun()
+
     st.markdown('</div>', unsafe_allow_html=True)
 
     ledger = df_query("""
@@ -1720,7 +1755,6 @@ elif menu == "Cari Gelir-Gider":
                cl.person_name AS kişi_tedarikçi,
                f.name AS firma, c.full_name AS aday,
                es.exam_date || ' ' || es.exam_time || ' / ' || COALESCE(es.myk_exam_id, '') AS sınav,
-               cl.person_name AS kişi_tedarikçi,
                cl.amount AS tutar,
                CASE cl.vat_included WHEN 1 THEN 'Evet' ELSE 'Hayır' END AS kdv_dahil,
                cl.payment_status AS ödeme_durumu,
@@ -2106,12 +2140,13 @@ elif menu == "Ayarlar":
 
     st.subheader("Kullanıcı Yönetimi")
 
+    st.info("Yeni kullanıcı oluşturduktan sonra Supabase Authentication ekranında kullanıcının email confirmed durumunu kontrol et. E-posta onayı açıksa kullanıcı mail onayı vermeden giriş yapamaz.")
+
     st.markdown("### Yeni kullanıcı oluştur")
     with st.form("new_user_form"):
         new_user_email = st.text_input("Yeni kullanıcı e-posta")
         new_user_password = st.text_input("Geçici şifre", type="password")
         new_user_role = st.selectbox("Kullanıcı rolü", ["operasyon", "muhasebe", "goruntuleme", "admin"])
-
         create_user_clicked = st.form_submit_button("Kullanıcı Oluştur")
 
     if create_user_clicked:
@@ -2121,31 +2156,9 @@ elif menu == "Ayarlar":
             st.error("Şifre en az 6 karakter olmalı.")
         else:
             try:
-                signup_response = supabase.auth.sign_up({
-                    "email": new_user_email.strip(),
-                    "password": new_user_password.strip()
-                })
-
-                # Trigger hemen profile açmazsa manuel upsert dene.
-                created_user_id = None
-                if getattr(signup_response, "user", None):
-                    created_user_id = signup_response.user.id
-
-                if created_user_id:
-                    supabase.table("profiles").upsert({
-                        "id": created_user_id,
-                        "email": new_user_email.strip(),
-                        "role": new_user_role
-                    }).execute()
-                else:
-                    # Bazı Supabase ayarlarında user objesi dönmeyebilir; profile oluştuysa email üzerinden güncelle.
-                    supabase.table("profiles").update({
-                        "role": new_user_role
-                    }).eq("email", new_user_email.strip()).execute()
-
-                st.success("Kullanıcı oluşturuldu. Supabase ayarında e-posta onayı açıksa kullanıcı mailden onay vermelidir.")
+                create_auth_user_and_profile(new_user_email, new_user_password, new_user_role)
+                st.success("Kullanıcı oluşturuldu ve rol kaydı işlendi. Giriş olmazsa Supabase > Authentication > Users ekranından kullanıcıyı confirmed yap veya şifresini güncelle.")
                 st.rerun()
-
             except Exception as e:
                 st.error("Kullanıcı oluşturulamadı.")
                 st.write(e)
@@ -2165,17 +2178,13 @@ elif menu == "Ayarlar":
                 role_email = st.selectbox("Rolü değiştirilecek kullanıcı", profiles_df["email"].tolist())
                 current_role = profiles_df.loc[profiles_df["email"] == role_email, "role"].iloc[0]
                 role_list = ["admin", "operasyon", "muhasebe", "goruntuleme"]
-                default_index = role_list.index(current_role) if current_role in role_list else 3
+                default_index = role_list.index(current_role) if current_role in role_list else 2
                 updated_role = st.selectbox("Yeni rol", role_list, index=default_index)
                 update_role_clicked = st.form_submit_button("Rolü Güncelle")
 
             if update_role_clicked:
                 user_id_to_update = profiles_df.loc[profiles_df["email"] == role_email, "id"].iloc[0]
-
-                supabase.table("profiles").update({
-                    "role": updated_role
-                }).eq("id", user_id_to_update).execute()
-
+                supabase.table("profiles").update({"role": updated_role}).eq("id", user_id_to_update).execute()
                 st.success(f"{role_email} kullanıcısının rolü {updated_role} olarak güncellendi.")
                 st.rerun()
 
