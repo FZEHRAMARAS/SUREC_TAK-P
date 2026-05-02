@@ -720,6 +720,30 @@ def auto_update_observer_required(session_id):
     return required, count
 
 
+
+def process_has_active_exam(process_ids, session_type):
+    if not process_ids:
+        return pd.DataFrame()
+
+    placeholders = ",".join(["?"] * len(process_ids))
+    params = [session_type] + [int(x) for x in process_ids]
+
+    return df_query(f"""
+        SELECT esc.candidate_process_id,
+               es.id AS session_id,
+               es.session_type,
+               es.exam_date,
+               es.exam_time,
+               es.myk_exam_id,
+               es.status
+        FROM exam_session_candidates esc
+        JOIN exam_sessions es ON es.id=esc.session_id
+        WHERE es.session_type=?
+          AND es.status!='İptal'
+          AND esc.candidate_process_id IN ({placeholders})
+    """, tuple(params))
+
+
 def create_exam_session_with_candidates(
     session_type,
     exam_date,
@@ -760,6 +784,27 @@ def create_exam_session_with_candidates(
         """, (new_session_id, process_id, reference_candidate_id))
 
     auto_update_observer_required(new_session_id)
+
+    # Aday süreç kartındaki 1. hak / 2. hak tarihlerini otomatik güncelle.
+    for process_id in selected_ref_process_ids:
+        proc = df_query("SELECT first_exam_date, first_right_status, second_exam_date, second_right_status FROM candidate_processes WHERE id=?", (int(process_id),))
+        if not proc.empty:
+            first_date = proc["first_exam_date"][0]
+            second_date = proc["second_exam_date"][0]
+
+            if not first_date:
+                execute("""
+                    UPDATE candidate_processes
+                    SET first_exam_date=?, first_right_status=?
+                    WHERE id=?
+                """, (str(exam_date), "Planlandı", int(process_id)))
+            elif not second_date:
+                execute("""
+                    UPDATE candidate_processes
+                    SET second_exam_date=?, second_right_status=?
+                    WHERE id=?
+                """, (str(exam_date), "Planlandı", int(process_id)))
+
     return new_session_id
 
 def upsert_firm(name):
@@ -1248,7 +1293,23 @@ elif menu == "Aday Süreçleri":
                     with s2:
                         status_options = ["Planlanmadı", "Planlandı", "Başarılı", "Başarısız", "Katılmadı", "İptal"]
                         edit_first = st.selectbox("1. hak", status_options, index=status_options.index(row["first_right_status"]) if row["first_right_status"] in status_options else 0)
+
+                        current_first_exam = pd.to_datetime(row["first_exam_date"], errors="coerce")
+                        edit_first_exam_date = st.date_input(
+                            "1. hak sınav tarihi",
+                            value=current_first_exam.date() if not pd.isna(current_first_exam) else None,
+                            format="DD/MM/YYYY"
+                        )
+
                         edit_second = st.selectbox("2. hak", status_options, index=status_options.index(row["second_right_status"]) if row["second_right_status"] in status_options else 0)
+
+                        current_second_exam = pd.to_datetime(row["second_exam_date"], errors="coerce")
+                        edit_second_exam_date = st.date_input(
+                            "2. hak sınav tarihi",
+                            value=current_second_exam.date() if not pd.isna(current_second_exam) else None,
+                            format="DD/MM/YYYY"
+                        )
+
                         entitlement_options = ["Bekliyor", "Hak kazandı", "Hak kazanamadı"]
                         edit_entitlement = st.selectbox("Belge hakkı", entitlement_options, index=entitlement_options.index(row["entitlement_status"]) if row["entitlement_status"] in entitlement_options else 0)
                     with s3:
@@ -1285,7 +1346,8 @@ elif menu == "Aday Süreçleri":
                             UPDATE candidate_processes
                             SET candidate_payment_amount=?, candidate_payment_received=?,
                                 firm_payment_amount=?, firm_payment_sent=?,
-                                first_right_status=?, second_right_status=?,
+                                first_right_status=?, first_exam_date=?,
+                                second_right_status=?, second_exam_date=?,
                                 entitlement_status=?, certificate_fee_paid=?,
                                 certificate_print_status=?, certificate_delivery_status=?,
                                 note=?
@@ -1296,7 +1358,9 @@ elif menu == "Aday Süreçleri":
                             edit_firm_payment_amount,
                             1 if edit_firm_payment_sent else 0,
                             edit_first,
+                            str(edit_first_exam_date) if edit_first_exam_date else None,
                             edit_second,
+                            str(edit_second_exam_date) if edit_second_exam_date else None,
                             edit_entitlement,
                             1 if edit_cert_paid else 0,
                             edit_print_status,
@@ -1456,10 +1520,27 @@ elif menu == "Sınav Planlama":
                     evaluator_id = evaluator_options[eval_label]
 
                     if plan_mode == "Teorik + Performans birlikte":
-                        conflict_teorik = pd.DataFrame()
+                        duplicate_teorik = process_has_active_exam(selected_ref_process_ids, "Teorik")
+                        duplicate_performans = process_has_active_exam(selected_ref_process_ids, "Performans")
+                        conflict_teorik = evaluator_has_conflict(evaluator_id, str(teorik_date), str(teorik_time))
                         conflict_performans = evaluator_has_conflict(evaluator_id, str(performans_date), str(performans_time))
 
-                        if not conflict_performans.empty:
+                        same_time_conflict = (str(teorik_date) == str(performans_date)) and (str(teorik_time) == str(performans_time))
+
+                        if not duplicate_teorik.empty or not duplicate_performans.empty:
+                            st.error("Bu aday/süreç için aktif sınav planı zaten var. Aynı türden tekrar sınav açılmadı.")
+                            if not duplicate_teorik.empty:
+                                st.write("Mevcut teorik plan:")
+                                st.dataframe(duplicate_teorik, width="stretch")
+                            if not duplicate_performans.empty:
+                                st.write("Mevcut performans plan:")
+                                st.dataframe(duplicate_performans, width="stretch")
+                        elif same_time_conflict:
+                            st.error("Teorik ve performans sınavı aynı değerlendirici için aynı tarih/saatte planlanamaz.")
+                        elif not conflict_teorik.empty:
+                            st.error("Değerlendirici çakışması var. Bu değerlendirici teorik sınav saatinde başka sınava atanmış. Sınavlar oluşturulmadı.")
+                            st.dataframe(conflict_teorik, width="stretch")
+                        elif not conflict_performans.empty:
                             st.error("Değerlendirici çakışması var. Bu değerlendirici performans sınavı saatinde başka sınava atanmış. Sınavlar oluşturulmadı.")
                             st.dataframe(conflict_performans, width="stretch")
                         else:
@@ -1497,9 +1578,13 @@ elif menu == "Sınav Planlama":
 
                     else:
                         session_type = "Teorik" if plan_mode == "Sadece Teorik" else "Performans"
+                        duplicate_df = process_has_active_exam(selected_ref_process_ids, session_type)
                         conflict_df = evaluator_has_conflict(evaluator_id, str(exam_date), str(exam_time))
 
-                        if session_type == "Performans" and not conflict_df.empty:
+                        if not duplicate_df.empty:
+                            st.error(f"Bu aday/süreç için aktif {session_type} sınav planı zaten var. Tekrar sınav oturumu oluşturulmadı.")
+                            st.dataframe(duplicate_df, width="stretch")
+                        elif not conflict_df.empty:
                             st.error("Değerlendirici çakışması var. Bu değerlendirici aynı gün ve aynı saatte başka bir sınava atanmış. Sınav oturumu oluşturulmadı.")
                             st.dataframe(conflict_df, width="stretch")
                         else:
@@ -1689,13 +1774,27 @@ elif menu == "Sınav Takvimi":
             download_df_button(calendar_df.drop(columns=["tarih_dt"], errors="ignore"), "tum_sinav_takvimi.xlsx")
         else:
             today = date.today()
-            monday = today - timedelta(days=today.weekday())
+            default_monday = today - timedelta(days=today.weekday())
+
+            if "calendar_week_start" not in st.session_state:
+                st.session_state.calendar_week_start = default_monday
+
+            nav1, nav2, nav3 = st.columns([1, 2, 1])
+            with nav1:
+                if st.button("← Önceki Hafta"):
+                    st.session_state.calendar_week_start = st.session_state.calendar_week_start - timedelta(days=7)
+            with nav3:
+                if st.button("Sonraki Hafta →"):
+                    st.session_state.calendar_week_start = st.session_state.calendar_week_start + timedelta(days=7)
+
             selected_week_start = st.date_input(
                 "Hafta başlangıcı",
-                value=monday,
+                value=st.session_state.calendar_week_start,
                 format="DD/MM/YYYY"
             )
+
             week_start = selected_week_start - timedelta(days=selected_week_start.weekday())
+            st.session_state.calendar_week_start = week_start
             week_end = week_start + timedelta(days=6)
 
             week_df = calendar_df[
