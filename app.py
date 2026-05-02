@@ -621,6 +621,49 @@ def money_fmt(x):
         return "0,00 TL"
 
 
+
+def ensure_cash_ledger_auto_columns():
+    """
+    Aday kaydı sırasında otomatik cari çalışmadan önce cash_ledger tablosunu
+    aynı anda garanti düzeltir. Eski canlı SQLite dosyasında eksik kolon varsa ekler.
+    """
+    conn = connect()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS cash_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_date TEXT DEFAULT CURRENT_DATE,
+        transaction_type TEXT NOT NULL,
+        category TEXT,
+        firm_id INTEGER,
+        candidate_id INTEGER,
+        session_id INTEGER,
+        person_name TEXT,
+        amount REAL NOT NULL DEFAULT 0,
+        vat_included INTEGER DEFAULT 1,
+        payment_status TEXT DEFAULT 'Bekliyor',
+        description TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("PRAGMA table_info(cash_ledger)")
+    cols = [row[1] for row in cur.fetchall()]
+
+    if "person_name" not in cols:
+        cur.execute("ALTER TABLE cash_ledger ADD COLUMN person_name TEXT")
+
+    if "candidate_process_id" not in cols:
+        cur.execute("ALTER TABLE cash_ledger ADD COLUMN candidate_process_id INTEGER")
+
+    if "auto_generated" not in cols:
+        cur.execute("ALTER TABLE cash_ledger ADD COLUMN auto_generated INTEGER DEFAULT 0")
+
+    conn.commit()
+    conn.close()
+
+
 def sync_auto_ledger_for_process(process_id):
     """
     Aday sürecindeki ödeme checkbox'larına göre otomatik cari kaydı üretir.
@@ -628,7 +671,7 @@ def sync_auto_ledger_for_process(process_id):
     Manuel cari kayıtlarına dokunmaz.
     """
     # Canlı Streamlit'te eski aday_takip.db kalmışsa eksik cari kolonlarını burada garanti ekle.
-    ensure_schema_updates()
+    ensure_cash_ledger_auto_columns()
 
     process_id = int(process_id)
 
@@ -653,10 +696,17 @@ def sync_auto_ledger_for_process(process_id):
 
     r = process_df.iloc[0]
 
-    execute(
-        "DELETE FROM cash_ledger WHERE candidate_process_id=? AND auto_generated=1",
-        (process_id,)
-    )
+    try:
+        execute(
+            "DELETE FROM cash_ledger WHERE candidate_process_id=? AND auto_generated=1",
+            (process_id,)
+        )
+    except sqlite3.OperationalError:
+        ensure_cash_ledger_auto_columns()
+        execute(
+            "DELETE FROM cash_ledger WHERE candidate_process_id=? AND auto_generated=1",
+            (process_id,)
+        )
 
     candidate_payment_amount = float(r["candidate_payment_amount"] or 0)
     firm_payment_amount = float(r["firm_payment_amount"] or 0)
@@ -899,6 +949,8 @@ def import_meslekler_excel(path_or_file):
 
     return imported, skipped
 
+
+ensure_cash_ledger_auto_columns()
 
 # -------------------- UI --------------------
 
